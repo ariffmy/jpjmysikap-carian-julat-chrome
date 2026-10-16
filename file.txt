@@ -1,0 +1,3141 @@
+(async () => {
+
+  /******************************************************************
+   * MySIKAP Range Runner v4.5
+   *
+   * SEMASA:
+   * Kategori → Negeri → Awalan → Akhiran → Nombor
+   *
+   * ISTIMEWA:
+   * Kategori → Awalan → Akhiran → Nombor
+   *
+   * Semi-auto:
+   * - Script isi form
+   * - User tekan Enter pada Cari
+   * - Jika "tiada dalam julat", script tutup popup
+   * - Tunggu reset
+   * - Maju +50
+   * - Isi range berikutnya
+   * - Berhenti apabila nombor tersedia ditemui
+   ******************************************************************/
+
+  /* ================================================================
+     CLEANUP VERSI LAMA
+     ================================================================ */
+
+  if (window.__mysikapRunnerInterval) {
+    clearInterval(window.__mysikapRunnerInterval);
+  }
+
+  if (window.__mysikapClickHandler) {
+    document.removeEventListener(
+      'click',
+      window.__mysikapClickHandler,
+      true
+    );
+  }
+
+  if (window.__mysikapKeyHandler) {
+    document.removeEventListener(
+      'keydown',
+      window.__mysikapKeyHandler,
+      true
+    );
+  }
+
+  document
+    .getElementById('mysikap-range-runner')
+    ?.remove();
+
+
+  /* ================================================================
+     CONFIG
+     ================================================================ */
+
+  const CFG = {
+    mula: 1,
+    akhir: 9999,
+    saiz: 50,
+    storageKey: 'mysikap_runner_v45'
+  };
+
+  const CATEGORY = {
+    SEMASA: 'Nombor Pendaftaran Semasa',
+    ISTIMEWA: 'Nombor Pendaftaran Istimewa'
+  };
+
+
+  /* ================================================================
+     STATE
+     ================================================================ */
+
+  let pilihan = {
+    kategori: '',
+    negeri: '',
+    awalan: '',
+    akhiran: ''
+  };
+
+  let currentStart = CFG.mula;
+
+  let autoMode = false;
+  let sedangIsi = false;
+
+  let carianTelahDibuat = false;
+  let failureConfirmed = false;
+
+  let panel = null;
+
+
+  /* ================================================================
+     BASIC HELPERS
+     ================================================================ */
+
+  const wait = ms =>
+    new Promise(resolve => setTimeout(resolve, ms));
+
+
+  const clean = s =>
+    (s || '')
+      .replace(/\u00a0/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+
+  function unique(items) {
+    return [
+      ...new Set(
+        items.filter(Boolean)
+      )
+    ];
+  }
+
+
+  function mouseClick(el) {
+
+    if (!el) {
+      return false;
+    }
+
+    [
+      'mousedown',
+      'mouseup',
+      'click'
+    ].forEach(type => {
+
+      el.dispatchEvent(
+        new MouseEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          view: window
+        })
+      );
+
+    });
+
+    return true;
+  }
+
+
+  function getStart() {
+    return currentStart;
+  }
+
+
+  function getEnd() {
+    return Math.min(
+      currentStart + CFG.saiz - 1,
+      CFG.akhir
+    );
+  }
+
+
+  function gunaNegeri() {
+    return (
+      pilihan.kategori === CATEGORY.SEMASA
+    );
+  }
+
+
+  /* ================================================================
+     ACTIVE / VISIBLE ZK COMPONENTS
+     ================================================================ */
+
+  function findVisibleLabel(text) {
+
+    return [
+      ...document.querySelectorAll('.z-label')
+    ].find(el => {
+
+      if (
+        clean(el.textContent) !== text
+      ) {
+        return false;
+      }
+
+      const row =
+        el.closest('tr');
+
+      return !!(
+        row &&
+        row.offsetParent !== null
+      );
+
+    }) || null;
+  }
+
+
+  function isComboInput(el) {
+
+    if (!el) {
+      return false;
+    }
+
+    return (
+      el.classList.contains(
+        'z-combobox-inp'
+      ) ||
+      el.classList.contains(
+        'z-combobox-rounded-inp'
+      )
+    );
+  }
+
+
+  function getActiveComboInput(labelText) {
+
+    const label =
+      findVisibleLabel(labelText);
+
+    if (!label) {
+      return null;
+    }
+
+    const row =
+      label.closest('tr');
+
+    if (
+      !row ||
+      row.offsetParent === null
+    ) {
+      return null;
+    }
+
+    const inputs = [
+      ...row.querySelectorAll('input')
+    ].filter(isComboInput);
+
+    /*
+     * Utamakan input yang visible.
+     * Fallback kepada input dalam active row.
+     */
+    return (
+      inputs.find(
+        input =>
+          input.offsetParent !== null
+      ) ||
+      inputs[0] ||
+      null
+    );
+  }
+
+
+  function getActiveComboRoot(labelText) {
+
+    const input =
+      getActiveComboInput(labelText);
+
+    return (
+      input?.parentElement ||
+      null
+    );
+  }
+
+
+  function getActiveItems(labelText) {
+
+    const root =
+      getActiveComboRoot(labelText);
+
+    if (!root) {
+      return [];
+    }
+
+    return unique(
+      [
+        ...root.querySelectorAll(
+          '.z-comboitem'
+        )
+      ]
+        .map(el =>
+          clean(el.textContent)
+        )
+        .filter(Boolean)
+    );
+  }
+
+
+  function activeComboExists(labelText) {
+
+    return !!getActiveComboInput(
+      labelText
+    );
+  }
+
+
+  /* ================================================================
+     WAIT FOR ZK
+     ================================================================ */
+
+  async function waitForActiveCombo(
+    labelText,
+    timeout = 10000
+  ) {
+
+    const until =
+      Date.now() + timeout;
+
+    while (
+      Date.now() < until
+    ) {
+
+      const input =
+        getActiveComboInput(
+          labelText
+        );
+
+      if (input) {
+        return input;
+      }
+
+      await wait(200);
+    }
+
+    return null;
+  }
+
+
+  async function waitForOptions(
+    labelText,
+    timeout = 10000
+  ) {
+
+    const until =
+      Date.now() + timeout;
+
+    while (
+      Date.now() < until
+    ) {
+
+      const items =
+        getActiveItems(labelText);
+
+      if (items.length) {
+        return items;
+      }
+
+      await wait(250);
+    }
+
+    return [];
+  }
+
+
+  async function waitForComboValue(
+    labelText,
+    expected,
+    timeout = 5000
+  ) {
+
+    const until =
+      Date.now() + timeout;
+
+    while (
+      Date.now() < until
+    ) {
+
+      const input =
+        getActiveComboInput(
+          labelText
+        );
+
+      if (
+        input &&
+        clean(input.value) === expected
+      ) {
+        return true;
+      }
+
+      await wait(150);
+    }
+
+    return false;
+  }
+
+
+  /* ================================================================
+     SELECT ZK COMBO
+     ================================================================ */
+
+  async function selectCombo(
+    labelText,
+    optionText
+  ) {
+
+    if (!optionText) {
+      throw new Error(
+        `Pilihan kosong: ${labelText}`
+      );
+    }
+
+    let input =
+      await waitForActiveCombo(
+        labelText,
+        10000
+      );
+
+    if (!input) {
+      throw new Error(
+        `Combobox aktif tak jumpa: ${labelText}`
+      );
+    }
+
+    if (
+      clean(input.value) ===
+      optionText
+    ) {
+      return true;
+    }
+
+    /*
+     * DOM boleh berubah selepas AU response.
+     * Sentiasa dapatkan root terkini.
+     */
+
+    let root =
+      input.parentElement;
+
+    let btn =
+      root?.querySelector(
+        '[id$="-btn"]'
+      );
+
+    if (!btn) {
+      throw new Error(
+        `Trigger tak jumpa: ${labelText}`
+      );
+    }
+
+    mouseClick(btn);
+
+    await wait(350);
+
+    /*
+     * Selepas popup dibuka, cuba cari item
+     * dalam root aktif dahulu.
+     */
+
+    input =
+      getActiveComboInput(
+        labelText
+      );
+
+    root =
+      input?.parentElement;
+
+    let item =
+      root
+        ? [
+            ...root.querySelectorAll(
+              '.z-comboitem'
+            )
+          ].find(el =>
+            clean(el.textContent) ===
+            optionText
+          )
+        : null;
+
+
+    /*
+     * Fallback kepada popup visible global.
+     */
+
+    if (!item) {
+
+      item = [
+        ...document.querySelectorAll(
+          '.z-comboitem'
+        )
+      ]
+        .filter(el =>
+          el.offsetParent !== null
+        )
+        .find(el =>
+          clean(el.textContent) ===
+          optionText
+        );
+
+    }
+
+
+    if (!item) {
+
+      /*
+       * Tutup semula jika popup masih terbuka.
+       */
+
+      btn =
+        root?.querySelector(
+          '[id$="-btn"]'
+        );
+
+      if (btn) {
+        mouseClick(btn);
+      }
+
+      throw new Error(
+        `Pilihan "${optionText}" tak jumpa dalam ${labelText}`
+      );
+    }
+
+
+    mouseClick(item);
+
+    const confirmed =
+      await waitForComboValue(
+        labelText,
+        optionText,
+        4000
+      );
+
+    if (!confirmed) {
+
+      throw new Error(
+        `${labelText} gagal bertukar kepada "${optionText}"`
+      );
+
+    }
+
+    /*
+     * Beri masa untuk ZK AU update
+     * dependent component.
+     */
+
+    await wait(850);
+
+    return true;
+  }
+
+
+  /* ================================================================
+     ZK NUMBER INPUT
+     ================================================================ */
+
+  function setZKInput(
+    input,
+    value
+  ) {
+
+    if (!input) {
+      return false;
+    }
+
+    input.focus();
+
+    input.value =
+      String(value);
+
+    input.dispatchEvent(
+      new Event(
+        'input',
+        {
+          bubbles: true
+        }
+      )
+    );
+
+    input.dispatchEvent(
+      new Event(
+        'change',
+        {
+          bubbles: true
+        }
+      )
+    );
+
+    input.dispatchEvent(
+      new Event(
+        'blur',
+        {
+          bubbles: true
+        }
+      )
+    );
+
+    return true;
+  }
+
+
+  function findNumberTextInputs() {
+
+    const label =
+      findVisibleLabel('Nombor :');
+
+    if (!label) {
+      return [];
+    }
+
+    const row =
+      label.closest('tr');
+
+    if (!row) {
+      return [];
+    }
+
+    /*
+     * Cari text/number input selain
+     * input combobox "Nombor".
+     */
+
+    return [
+      ...row.querySelectorAll(
+        'input'
+      )
+    ].filter(input => {
+
+      if (
+        input.offsetParent === null
+      ) {
+        return false;
+      }
+
+      if (
+        isComboInput(input)
+      ) {
+        return false;
+      }
+
+      const type =
+        (input.type || '')
+          .toLowerCase();
+
+      return (
+        type === 'text' ||
+        type === 'number' ||
+        type === ''
+      );
+
+    });
+  }
+
+
+  async function waitForNumberInputs(
+    timeout = 6000
+  ) {
+
+    const until =
+      Date.now() + timeout;
+
+    while (
+      Date.now() < until
+    ) {
+
+      const inputs =
+        findNumberTextInputs();
+
+      if (
+        inputs.length >= 2
+      ) {
+        return inputs;
+      }
+
+      await wait(200);
+    }
+
+    return [];
+  }
+
+
+  /* ================================================================
+     CARI BUTTON
+     ================================================================ */
+
+  function getCariButton() {
+
+    return [
+      ...document.querySelectorAll(
+        'button,' +
+        'input[type="button"],' +
+        'input[type="submit"]'
+      )
+    ]
+      .filter(el =>
+        el.offsetParent !== null
+      )
+      .find(el =>
+        clean(
+          el.textContent ||
+          el.value ||
+          ''
+        ) === 'Cari'
+      ) || null;
+  }
+
+
+  async function fokusCari() {
+
+    await wait(300);
+
+    const btn =
+      getCariButton();
+
+    if (!btn) {
+
+      updatePanel(
+        'Butang Cari tak jumpa'
+      );
+
+      return false;
+    }
+
+    btn.scrollIntoView({
+      behavior: 'smooth',
+      block: 'center'
+    });
+
+    btn.style.outline =
+      '3px solid #ff9800';
+
+    btn.style.outlineOffset =
+      '3px';
+
+    btn.focus();
+
+    return true;
+  }
+
+
+  /* ================================================================
+     STORAGE
+     ================================================================ */
+
+  function saveState() {
+
+    try {
+
+      localStorage.setItem(
+        CFG.storageKey,
+        JSON.stringify({
+          kategori:
+            pilihan.kategori,
+
+          negeri:
+            gunaNegeri()
+              ? pilihan.negeri
+              : '',
+
+          awalan:
+            pilihan.awalan,
+
+          akhiran:
+            pilihan.akhiran,
+
+          start:
+            currentStart
+        })
+      );
+
+    } catch (err) {
+      console.warn(
+        'Storage gagal:',
+        err
+      );
+    }
+  }
+
+
+  function loadState() {
+
+    try {
+
+      const raw =
+        localStorage.getItem(
+          CFG.storageKey
+        );
+
+      if (!raw) {
+        return null;
+      }
+
+      const data =
+        JSON.parse(raw);
+
+      return data;
+
+    } catch (err) {
+
+      console.warn(
+        'Storage restore gagal:',
+        err
+      );
+
+      return null;
+    }
+  }
+
+
+  /* ================================================================
+     PANEL
+     ================================================================ */
+
+  function createOption(
+    value,
+    text = value
+  ) {
+
+    const option =
+      document.createElement(
+        'option'
+      );
+
+    option.value = value;
+    option.textContent = text;
+
+    return option;
+  }
+
+
+  function setSelectOptions(
+    select,
+    items,
+    placeholder
+  ) {
+
+    if (!select) {
+      return;
+    }
+
+    select.innerHTML = '';
+
+    select.appendChild(
+      createOption(
+        '',
+        placeholder
+      )
+    );
+
+    unique(items)
+      .forEach(item => {
+
+        select.appendChild(
+          createOption(
+            item,
+            item
+          )
+        );
+
+      });
+  }
+
+
+  function buildPanel() {
+
+    panel =
+      document.createElement('div');
+
+    panel.id =
+      'mysikap-range-runner';
+
+    panel.innerHTML = `
+
+      <style>
+
+        #mysikap-range-runner {
+          position: fixed;
+          top: 18px;
+          right: 18px;
+          width: 330px;
+          z-index: 2147483647;
+          background: #111827;
+          color: #f9fafb;
+          border: 1px solid #374151;
+          border-radius: 12px;
+          box-shadow:
+            0 12px 32px
+            rgba(0,0,0,.30);
+          font-family:
+            Arial,
+            sans-serif;
+          font-size: 13px;
+          overflow: hidden;
+        }
+
+        #mysikap-range-runner * {
+          box-sizing: border-box;
+        }
+
+        #ms-header {
+          padding: 14px 16px 12px;
+          background: #1f2937;
+          border-bottom:
+            1px solid #374151;
+        }
+
+        #ms-title {
+          font-size: 15px;
+          font-weight: 700;
+          line-height: 1.3;
+        }
+
+        #ms-subtitle {
+          margin-top: 3px;
+          color: #9ca3af;
+          font-size: 11px;
+        }
+
+        #ms-body {
+          padding: 14px 16px 16px;
+        }
+
+        .ms-field {
+          margin-bottom: 10px;
+        }
+
+        .ms-field label {
+          display: block;
+          margin-bottom: 4px;
+          color: #d1d5db;
+          font-size: 11px;
+          font-weight: 700;
+        }
+
+        .ms-field select,
+        .ms-field input {
+          width: 100%;
+          height: 34px;
+          padding: 0 9px;
+          border:
+            1px solid #4b5563;
+          border-radius: 6px;
+          background: #0f172a;
+          color: #f9fafb;
+          outline: none;
+        }
+
+        .ms-field select:focus,
+        .ms-field input:focus {
+          border-color: #9ca3af;
+        }
+
+        .ms-field select:disabled,
+        .ms-field input:disabled {
+          opacity: .45;
+          cursor: not-allowed;
+        }
+
+        #ms-negeri-wrap {
+          display: none;
+        }
+
+        #ms-info {
+          margin-top: 12px;
+          padding: 10px;
+          border-radius: 7px;
+          background: #0f172a;
+          border:
+            1px solid #374151;
+        }
+
+        .ms-info-row {
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          margin-bottom: 5px;
+        }
+
+        .ms-info-row:last-child {
+          margin-bottom: 0;
+        }
+
+        .ms-info-label {
+          color: #9ca3af;
+        }
+
+        .ms-info-value {
+          text-align: right;
+          font-weight: 700;
+        }
+
+        #ms-status {
+          margin-top: 10px;
+          min-height: 36px;
+          padding: 9px;
+          border-radius: 7px;
+          background: #1f2937;
+          color: #e5e7eb;
+          line-height: 1.45;
+        }
+
+        #ms-toggle {
+          width: 100%;
+          margin-top: 12px;
+          height: 38px;
+          border: 0;
+          border-radius: 7px;
+          background: #2563eb;
+          color: white;
+          font-weight: 700;
+          cursor: pointer;
+        }
+
+        #ms-toggle:hover {
+          filter: brightness(1.08);
+        }
+
+        #ms-toggle.running {
+          background: #b91c1c;
+        }
+
+      </style>
+
+      <div id="ms-header">
+
+        <div id="ms-title">
+          MySIKAP Range Runner v4.5
+        </div>
+
+        <div id="ms-subtitle">
+          Dynamic Category & Series
+        </div>
+
+      </div>
+
+      <div id="ms-body">
+
+        <div class="ms-field">
+
+          <label>
+            Kategori Siri
+          </label>
+
+          <select id="ms-kategori">
+            <option value="">
+              Memuatkan...
+            </option>
+          </select>
+
+        </div>
+
+
+        <div
+          class="ms-field"
+          id="ms-negeri-wrap"
+        >
+
+          <label>
+            Negeri / Kawasan
+          </label>
+
+          <select id="ms-negeri">
+            <option value="">
+              Pilih Negeri / Kawasan
+            </option>
+          </select>
+
+        </div>
+
+
+        <div class="ms-field">
+
+          <label>
+            Siri Awalan
+          </label>
+
+          <select
+            id="ms-awalan"
+            disabled
+          >
+            <option value="">
+              Pilih Siri Awalan
+            </option>
+          </select>
+
+        </div>
+
+
+        <div class="ms-field">
+
+          <label>
+            Siri Akhiran
+          </label>
+
+          <select
+            id="ms-akhiran"
+            disabled
+          >
+            <option value="">
+              Pilih Siri Akhiran
+            </option>
+          </select>
+
+        </div>
+
+
+        <div class="ms-field">
+
+          <label>
+            Mula Dari
+          </label>
+
+          <input
+            id="ms-start"
+            type="number"
+            min="1"
+            max="9999"
+            value="1"
+          >
+
+        </div>
+
+
+        <div id="ms-info">
+
+          <div class="ms-info-row">
+
+            <span class="ms-info-label">
+              Range
+            </span>
+
+            <span
+              class="ms-info-value"
+              id="ms-range"
+            >
+              1-50
+            </span>
+
+          </div>
+
+          <div class="ms-info-row">
+
+            <span class="ms-info-label">
+              Progress
+            </span>
+
+            <span
+              class="ms-info-value"
+              id="ms-progress"
+            >
+              0%
+            </span>
+
+          </div>
+
+        </div>
+
+
+        <div id="ms-status">
+          Memuatkan konfigurasi...
+        </div>
+
+
+        <button id="ms-toggle">
+          AKTIFKAN SEMI-AUTO
+        </button>
+
+      </div>
+    `;
+
+    document.body.appendChild(
+      panel
+    );
+  }
+
+
+  function el(id) {
+    return document.getElementById(id);
+  }
+
+
+  function updateRangeDisplay() {
+
+    const rangeEl =
+      el('ms-range');
+
+    const progressEl =
+      el('ms-progress');
+
+    if (rangeEl) {
+      rangeEl.textContent =
+        `${getStart()}-${getEnd()}`;
+    }
+
+    if (progressEl) {
+
+      const completed =
+        Math.max(
+          0,
+          getStart() - CFG.mula
+        );
+
+      const total =
+        CFG.akhir -
+        CFG.mula +
+        1;
+
+      const pct =
+        Math.min(
+          100,
+          (
+            completed /
+            total
+          ) * 100
+        );
+
+      progressEl.textContent =
+        `${pct.toFixed(1)}%`;
+    }
+  }
+
+
+  function updatePanel(status) {
+
+    updateRangeDisplay();
+
+    const statusEl =
+      el('ms-status');
+
+    if (statusEl) {
+      statusEl.textContent =
+        status;
+    }
+  }
+
+
+  function updateCategoryUI() {
+
+    const wrap =
+      el('ms-negeri-wrap');
+
+    if (!wrap) {
+      return;
+    }
+
+    if (gunaNegeri()) {
+      wrap.style.display =
+        'block';
+    } else {
+      wrap.style.display =
+        'none';
+    }
+  }
+
+
+  function lockConfig(lock) {
+
+    [
+      'ms-kategori',
+      'ms-negeri',
+      'ms-awalan',
+      'ms-akhiran',
+      'ms-start'
+    ].forEach(id => {
+
+      const control =
+        el(id);
+
+      if (control) {
+        control.disabled = lock;
+      }
+
+    });
+
+    /*
+     * Bila unlocked, dependency akan
+     * ditentukan semula.
+     */
+
+    if (!lock) {
+
+      const negeri =
+        el('ms-negeri');
+
+      const awalan =
+        el('ms-awalan');
+
+      const akhiran =
+        el('ms-akhiran');
+
+      if (negeri) {
+        negeri.disabled =
+          !(
+            pilihan.kategori ===
+            CATEGORY.SEMASA
+          );
+      }
+
+      if (awalan) {
+
+        awalan.disabled =
+          !pilihan.kategori ||
+          (
+            gunaNegeri() &&
+            !pilihan.negeri
+          );
+
+      }
+
+      if (akhiran) {
+
+        akhiran.disabled =
+          !pilihan.awalan;
+
+      }
+    }
+  }
+
+
+  /* ================================================================
+     CONFIGURATION FLOW
+     ================================================================ */
+
+  async function loadCategories() {
+
+    const select =
+      el('ms-kategori');
+
+    const items =
+      await waitForOptions(
+        'Kategori Siri',
+        6000
+      );
+
+    setSelectOptions(
+      select,
+      items,
+      'Pilih Kategori Siri'
+    );
+
+    return items;
+  }
+
+
+  async function configureKategori(
+    kategori,
+    restoring = false,
+    saved = null
+  ) {
+
+    pilihan.kategori =
+      kategori || '';
+
+    pilihan.negeri = '';
+    pilihan.awalan = '';
+    pilihan.akhiran = '';
+
+    updateCategoryUI();
+
+    const negeriSelect =
+      el('ms-negeri');
+
+    const awalanSelect =
+      el('ms-awalan');
+
+    const akhiranSelect =
+      el('ms-akhiran');
+
+
+    setSelectOptions(
+      negeriSelect,
+      [],
+      'Pilih Negeri / Kawasan'
+    );
+
+    setSelectOptions(
+      awalanSelect,
+      [],
+      'Pilih Siri Awalan'
+    );
+
+    setSelectOptions(
+      akhiranSelect,
+      [],
+      'Pilih Siri Akhiran'
+    );
+
+
+    if (!kategori) {
+
+      if (negeriSelect) {
+        negeriSelect.disabled = true;
+      }
+
+      if (awalanSelect) {
+        awalanSelect.disabled = true;
+      }
+
+      if (akhiranSelect) {
+        akhiranSelect.disabled = true;
+      }
+
+      updatePanel(
+        'Pilih kategori siri'
+      );
+
+      saveState();
+
+      return;
+    }
+
+
+    updatePanel(
+      `Menetapkan ${kategori}...`
+    );
+
+
+    await selectCombo(
+      'Kategori Siri',
+      kategori
+    );
+
+
+    /*
+     * ==============================
+     * SEMASA
+     * ==============================
+     */
+
+    if (
+      kategori === CATEGORY.SEMASA
+    ) {
+
+      updateCategoryUI();
+
+      const negeriItems =
+        await waitForOptions(
+          'Negeri / Kawasan :',
+          10000
+        );
+
+      setSelectOptions(
+        negeriSelect,
+        negeriItems,
+        'Pilih Negeri / Kawasan'
+      );
+
+      if (negeriSelect) {
+        negeriSelect.disabled = false;
+      }
+
+      if (awalanSelect) {
+        awalanSelect.disabled = true;
+      }
+
+      if (akhiranSelect) {
+        akhiranSelect.disabled = true;
+      }
+
+
+      if (
+        restoring &&
+        saved?.negeri &&
+        negeriItems.includes(
+          saved.negeri
+        )
+      ) {
+
+        negeriSelect.value =
+          saved.negeri;
+
+        await configureNegeri(
+          saved.negeri,
+          true,
+          saved
+        );
+
+      } else {
+
+        updatePanel(
+          `${negeriItems.length} Negeri / Kawasan tersedia`
+        );
+
+      }
+
+    }
+
+
+    /*
+     * ==============================
+     * ISTIMEWA
+     * ==============================
+     */
+
+    else if (
+      kategori === CATEGORY.ISTIMEWA
+    ) {
+
+      pilihan.negeri = '';
+
+      updateCategoryUI();
+
+      /*
+       * Tunggu rounded combobox
+       * Istimewa muncul.
+       */
+
+      await waitForActiveCombo(
+        'Siri Awalan',
+        10000
+      );
+
+      const awalanItems =
+        await waitForOptions(
+          'Siri Awalan',
+          10000
+        );
+
+      setSelectOptions(
+        awalanSelect,
+        awalanItems,
+        'Pilih Siri Awalan'
+      );
+
+      if (awalanSelect) {
+        awalanSelect.disabled = false;
+      }
+
+      if (akhiranSelect) {
+        akhiranSelect.disabled = true;
+      }
+
+
+      if (
+        restoring &&
+        saved?.awalan &&
+        awalanItems.includes(
+          saved.awalan
+        )
+      ) {
+
+        awalanSelect.value =
+          saved.awalan;
+
+        await configureAwalan(
+          saved.awalan,
+          true,
+          saved
+        );
+
+      } else {
+
+        updatePanel(
+          `${awalanItems.length} Siri Awalan Istimewa tersedia`
+        );
+
+      }
+
+    }
+
+    else {
+
+      updatePanel(
+        'Kategori tidak dikenali'
+      );
+
+    }
+
+    saveState();
+  }
+
+
+  async function configureNegeri(
+    negeri,
+    restoring = false,
+    saved = null
+  ) {
+
+    if (!gunaNegeri()) {
+      return;
+    }
+
+    pilihan.negeri =
+      negeri || '';
+
+    pilihan.awalan = '';
+    pilihan.akhiran = '';
+
+    const awalanSelect =
+      el('ms-awalan');
+
+    const akhiranSelect =
+      el('ms-akhiran');
+
+
+    setSelectOptions(
+      awalanSelect,
+      [],
+      'Pilih Siri Awalan'
+    );
+
+    setSelectOptions(
+      akhiranSelect,
+      [],
+      'Pilih Siri Akhiran'
+    );
+
+
+    if (!negeri) {
+
+      awalanSelect.disabled =
+        true;
+
+      akhiranSelect.disabled =
+        true;
+
+      updatePanel(
+        'Pilih Negeri / Kawasan'
+      );
+
+      saveState();
+
+      return;
+    }
+
+
+    updatePanel(
+      `Memuatkan siri ${negeri}...`
+    );
+
+
+    await selectCombo(
+      'Negeri / Kawasan :',
+      negeri
+    );
+
+
+    const awalanItems =
+      await waitForOptions(
+        'Siri Awalan',
+        10000
+      );
+
+
+    setSelectOptions(
+      awalanSelect,
+      awalanItems,
+      'Pilih Siri Awalan'
+    );
+
+
+    awalanSelect.disabled =
+      false;
+
+    akhiranSelect.disabled =
+      true;
+
+
+    if (
+      restoring &&
+      saved?.awalan &&
+      awalanItems.includes(
+        saved.awalan
+      )
+    ) {
+
+      awalanSelect.value =
+        saved.awalan;
+
+      await configureAwalan(
+        saved.awalan,
+        true,
+        saved
+      );
+
+    } else {
+
+      updatePanel(
+        `${awalanItems.length} Siri Awalan tersedia`
+      );
+
+    }
+
+    saveState();
+  }
+
+
+  async function configureAwalan(
+    awalan,
+    restoring = false,
+    saved = null
+  ) {
+
+    pilihan.awalan =
+      awalan || '';
+
+    pilihan.akhiran = '';
+
+    const akhiranSelect =
+      el('ms-akhiran');
+
+
+    setSelectOptions(
+      akhiranSelect,
+      [],
+      'Pilih Siri Akhiran'
+    );
+
+
+    if (!awalan) {
+
+      akhiranSelect.disabled =
+        true;
+
+      updatePanel(
+        'Pilih Siri Awalan'
+      );
+
+      saveState();
+
+      return;
+    }
+
+
+    updatePanel(
+      `Memuatkan akhiran ${awalan}...`
+    );
+
+
+    await selectCombo(
+      'Siri Awalan',
+      awalan
+    );
+
+
+    /*
+     * Ada kemungkinan sesetengah siri
+     * tidak mempunyai akhiran.
+     *
+     * Tunggu sekejap untuk AU response.
+     */
+
+    await wait(500);
+
+    const akhiranItems =
+      await waitForOptions(
+        'Siri Akhiran',
+        6000
+      );
+
+
+    if (!akhiranItems.length) {
+
+      /*
+       * Kalau memang tiada option,
+       * kosong dibenarkan.
+       */
+
+      pilihan.akhiran = '';
+
+      setSelectOptions(
+        akhiranSelect,
+        [],
+        'Tiada Siri Akhiran'
+      );
+
+      akhiranSelect.disabled =
+        true;
+
+      updatePanel(
+        `${awalan}: tiada Siri Akhiran`
+      );
+
+      saveState();
+
+      return;
+    }
+
+
+    setSelectOptions(
+      akhiranSelect,
+      akhiranItems,
+      'Pilih Siri Akhiran'
+    );
+
+    akhiranSelect.disabled =
+      false;
+
+
+    if (
+      restoring &&
+      saved?.akhiran &&
+      akhiranItems.includes(
+        saved.akhiran
+      )
+    ) {
+
+      akhiranSelect.value =
+        saved.akhiran;
+
+      pilihan.akhiran =
+        saved.akhiran;
+
+      await selectCombo(
+        'Siri Akhiran',
+        saved.akhiran
+      );
+
+      updatePanel(
+        'Konfigurasi dipulihkan'
+      );
+
+    } else {
+
+      updatePanel(
+        `${akhiranItems.length} Siri Akhiran tersedia`
+      );
+
+    }
+
+    saveState();
+  }
+
+
+  async function configureAkhiran(
+    akhiran
+  ) {
+
+    pilihan.akhiran =
+      akhiran || '';
+
+    if (!akhiran) {
+
+      updatePanel(
+        'Pilih Siri Akhiran'
+      );
+
+      saveState();
+
+      return;
+    }
+
+
+    updatePanel(
+      `Menetapkan akhiran ${akhiran}...`
+    );
+
+
+    await selectCombo(
+      'Siri Akhiran',
+      akhiran
+    );
+
+
+    updatePanel(
+      'Konfigurasi lengkap'
+    );
+
+    saveState();
+  }
+
+
+  /* ================================================================
+     VALIDATION
+     ================================================================ */
+
+  function validateConfig() {
+
+    if (!pilihan.kategori) {
+
+      return {
+        ok: false,
+        msg:
+          'Pilih Kategori Siri dahulu'
+      };
+    }
+
+
+    if (
+      gunaNegeri() &&
+      !pilihan.negeri
+    ) {
+
+      return {
+        ok: false,
+        msg:
+          'Pilih Negeri / Kawasan dahulu'
+      };
+    }
+
+
+    if (!pilihan.awalan) {
+
+      return {
+        ok: false,
+        msg:
+          'Pilih Siri Awalan dahulu'
+      };
+    }
+
+
+    /*
+     * Akhiran hanya wajib jika
+     * combobox mempunyai pilihan.
+     */
+
+    const akhiranItems =
+      getActiveItems(
+        'Siri Akhiran'
+      );
+
+    if (
+      akhiranItems.length &&
+      !pilihan.akhiran
+    ) {
+
+      return {
+        ok: false,
+        msg:
+          'Pilih Siri Akhiran dahulu'
+      };
+    }
+
+
+    if (
+      !Number.isInteger(
+        currentStart
+      ) ||
+      currentStart < 1 ||
+      currentStart > 9999
+    ) {
+
+      return {
+        ok: false,
+        msg:
+          'Mula Dari mesti antara 1 hingga 9999'
+      };
+    }
+
+
+    return {
+      ok: true
+    };
+  }
+
+
+  /* ================================================================
+     FILL FORM
+     ================================================================ */
+
+  async function isiForm() {
+
+    if (sedangIsi) {
+      return;
+    }
+
+    const validation =
+      validateConfig();
+
+    if (!validation.ok) {
+
+      updatePanel(
+        validation.msg
+      );
+
+      return;
+    }
+
+
+    sedangIsi = true;
+
+    carianTelahDibuat = false;
+    failureConfirmed = false;
+
+
+    try {
+
+      updatePanel(
+        `Mengisi ${getStart()}-${getEnd()}...`
+      );
+
+
+      /*
+       * 1. Kategori
+       */
+
+      await selectCombo(
+        'Kategori Siri',
+        pilihan.kategori
+      );
+
+
+      /*
+       * 2. Negeri hanya untuk Semasa
+       */
+
+      if (gunaNegeri()) {
+
+        await selectCombo(
+          'Negeri / Kawasan :',
+          pilihan.negeri
+        );
+
+      }
+
+
+      /*
+       * 3. Awalan
+       */
+
+      await selectCombo(
+        'Siri Awalan',
+        pilihan.awalan
+      );
+
+
+      /*
+       * 4. Akhiran
+       *
+       * Hanya pilih jika memang ada.
+       */
+
+      const akhiranItems =
+        await waitForOptions(
+          'Siri Akhiran',
+          4000
+        );
+
+
+      if (
+        pilihan.akhiran &&
+        akhiranItems.includes(
+          pilihan.akhiran
+        )
+      ) {
+
+        await selectCombo(
+          'Siri Akhiran',
+          pilihan.akhiran
+        );
+
+      }
+
+
+      /*
+       * 5. Nombor = Julat
+       */
+
+      await selectCombo(
+        'Nombor :',
+        'Julat (Pilihan Dalam Lingkungan 50 Nombor)'
+      );
+
+
+      /*
+       * 6. Cari input range
+       */
+
+      const rangeInputs =
+        await waitForNumberInputs(
+          7000
+        );
+
+
+      if (
+        rangeInputs.length < 2
+      ) {
+
+        throw new Error(
+          'Input julat nombor tak jumpa'
+        );
+      }
+
+
+      setZKInput(
+        rangeInputs[0],
+        getStart()
+      );
+
+      await wait(150);
+
+      setZKInput(
+        rangeInputs[1],
+        getEnd()
+      );
+
+
+      saveState();
+
+      updatePanel(
+        `${getStart()}-${getEnd()} sedia — tekan ENTER pada Cari`
+      );
+
+
+      await fokusCari();
+
+    }
+
+    catch (err) {
+
+      console.error(
+        '[MySIKAP v4.5]',
+        err
+      );
+
+      updatePanel(
+        `ERROR: ${err.message}`
+      );
+
+      autoMode = false;
+
+      lockConfig(false);
+
+      const toggle =
+        el('ms-toggle');
+
+      if (toggle) {
+
+        toggle.textContent =
+          'AKTIFKAN SEMI-AUTO';
+
+        toggle.classList.remove(
+          'running'
+        );
+      }
+
+    }
+
+    finally {
+
+      sedangIsi = false;
+
+    }
+  }
+
+
+  /* ================================================================
+     SUCCESS DETECTOR
+     ================================================================ */
+
+  function detectAvailableResult() {
+
+    const TARGET =
+      'Sila pilih salah satu daripada senarai.';
+
+
+    const instruction = [
+      ...document.querySelectorAll(
+        'body *'
+      )
+    ].find(el => {
+
+      return (
+        el.children.length === 0 &&
+        el.offsetParent !== null &&
+        clean(el.textContent) === TARGET
+      );
+
+    });
+
+
+    if (!instruction) {
+      return null;
+    }
+
+
+    const radios = [
+      ...document.querySelectorAll(
+        'input[type="radio"]'
+      )
+    ].filter(el =>
+      el.offsetParent !== null
+    );
+
+
+    if (!radios.length) {
+      return null;
+    }
+
+
+    const numbers = [];
+
+
+    radios.forEach(radio => {
+
+      const candidates = [];
+
+
+      if (radio.value) {
+        candidates.push(
+          clean(radio.value)
+        );
+      }
+
+
+      if (radio.id) {
+
+        const label =
+          document.querySelector(
+            `label[for="${CSS.escape(radio.id)}"]`
+          );
+
+        if (label) {
+          candidates.push(
+            clean(label.textContent)
+          );
+        }
+      }
+
+
+      if (radio.parentElement) {
+
+        candidates.push(
+          clean(
+            radio.parentElement.textContent
+          )
+        );
+
+      }
+
+
+      const td =
+        radio.closest('td');
+
+      if (td) {
+
+        candidates.push(
+          clean(td.textContent)
+        );
+
+      }
+
+
+      candidates.forEach(text => {
+
+        const matches =
+          text.match(
+            /\b\d{1,4}\b/g
+          ) || [];
+
+
+        matches.forEach(n => {
+
+          const value =
+            Number(n);
+
+          if (
+            value >= getStart() &&
+            value <= getEnd()
+          ) {
+
+            numbers.push(value);
+
+          }
+
+        });
+
+      });
+
+    });
+
+
+    return {
+      found: true,
+      count: radios.length,
+      numbers:
+        unique(
+          numbers.map(String)
+        ).map(Number)
+    };
+  }
+
+
+  /* ================================================================
+     EXACT FAILURE POPUP
+     ================================================================ */
+
+  function tutupPopupTiadaJulat() {
+
+    const TARGET =
+      'Nombor yang diberikan tiada dalam julat.';
+
+
+    const message = [
+      ...document.querySelectorAll(
+        'body *'
+      )
+    ].find(el => {
+
+      return (
+        el.children.length === 0 &&
+        el.offsetParent !== null &&
+        clean(el.textContent) === TARGET
+      );
+
+    });
+
+
+    if (!message) {
+      return false;
+    }
+
+
+    let node = message;
+    let tutup = null;
+
+
+    while (
+      node &&
+      node !== document.body
+    ) {
+
+      tutup = [
+        ...node.querySelectorAll(
+          'button,' +
+          'input[type="button"],' +
+          'input[type="submit"]'
+        )
+      ]
+        .filter(el =>
+          el.offsetParent !== null
+        )
+        .find(el =>
+          clean(
+            el.textContent ||
+            el.value ||
+            ''
+          ) === 'Tutup'
+        );
+
+
+      if (tutup) {
+        break;
+      }
+
+
+      node =
+        node.parentElement;
+    }
+
+
+    if (!tutup) {
+
+      tutup = [
+        ...document.querySelectorAll(
+          'button,' +
+          'input[type="button"],' +
+          'input[type="submit"]'
+        )
+      ]
+        .filter(el =>
+          el.offsetParent !== null
+        )
+        .find(el =>
+          clean(
+            el.textContent ||
+            el.value ||
+            ''
+          ) === 'Tutup'
+        );
+
+    }
+
+
+    if (!tutup) {
+
+      updatePanel(
+        'Popup dijumpai — butang Tutup tak jumpa'
+      );
+
+      return false;
+    }
+
+
+    failureConfirmed = true;
+
+
+    updatePanel(
+      `${getStart()}-${getEnd()}: TIADA`
+    );
+
+
+    mouseClick(tutup);
+
+    return true;
+  }
+
+
+  /* ================================================================
+     RESET DETECTOR
+     ================================================================ */
+
+  function formIsReset() {
+
+    const input =
+      getActiveComboInput(
+        'Kategori Siri'
+      );
+
+    if (!input) {
+      return false;
+    }
+
+
+    const value =
+      clean(input.value);
+
+
+    return (
+      value === '' ||
+      value === 'Sila Pilih' ||
+      value === '-- Sila Pilih --'
+    );
+  }
+
+
+  async function waitForReset(
+    timeout = 6000
+  ) {
+
+    const until =
+      Date.now() + timeout;
+
+
+    while (
+      Date.now() < until
+    ) {
+
+      if (formIsReset()) {
+        return true;
+      }
+
+
+      await wait(200);
+    }
+
+
+    return false;
+  }
+
+
+  /* ================================================================
+     ADVANCE RANGE
+     ================================================================ */
+
+  async function advanceRange() {
+
+    const next =
+      currentStart + CFG.saiz;
+
+
+    if (
+      next > CFG.akhir
+    ) {
+
+      autoMode = false;
+
+      lockConfig(false);
+
+      const toggle =
+        el('ms-toggle');
+
+      if (toggle) {
+
+        toggle.textContent =
+          'AKTIFKAN SEMI-AUTO';
+
+        toggle.classList.remove(
+          'running'
+        );
+      }
+
+
+      updatePanel(
+        'SELESAI — julat hingga 9999 telah diperiksa'
+      );
+
+      return;
+    }
+
+
+    currentStart =
+      next;
+
+
+    const startInput =
+      el('ms-start');
+
+    if (startInput) {
+      startInput.value =
+        currentStart;
+    }
+
+
+    saveState();
+
+    updateRangeDisplay();
+
+
+    await isiForm();
+  }
+
+
+  /* ================================================================
+     MONITOR
+     ================================================================ */
+
+  async function monitor() {
+
+    if (
+      !autoMode ||
+      sedangIsi ||
+      !carianTelahDibuat
+    ) {
+      return;
+    }
+
+
+    /*
+     * PRIORITY 1:
+     * Success result.
+     */
+
+    const success =
+      detectAvailableResult();
+
+
+    if (
+      success?.found
+    ) {
+
+      autoMode = false;
+
+      carianTelahDibuat =
+        false;
+
+      failureConfirmed =
+        false;
+
+
+      lockConfig(false);
+
+
+      const toggle =
+        el('ms-toggle');
+
+      if (toggle) {
+
+        toggle.textContent =
+          'AKTIFKAN SEMI-AUTO';
+
+        toggle.classList.remove(
+          'running'
+        );
+
+      }
+
+
+      let msg =
+        `AVAILABLE FOUND — ${success.count} nombor tersedia`;
+
+
+      if (
+        success.numbers.length
+      ) {
+
+        msg +=
+          `: ${success.numbers.join(', ')}`;
+
+      }
+
+
+      updatePanel(msg);
+
+      return;
+    }
+
+
+    /*
+     * PRIORITY 2:
+     * Exact failure popup.
+     */
+
+    if (!failureConfirmed) {
+
+      const closed =
+        tutupPopupTiadaJulat();
+
+
+      if (!closed) {
+        return;
+      }
+
+
+      /*
+       * beri masa popup close
+       */
+
+      await wait(500);
+    }
+
+
+    /*
+     * PRIORITY 3:
+     * tunggu MySIKAP reset form.
+     */
+
+    const reset =
+      await waitForReset(
+        6000
+      );
+
+
+    if (!reset) {
+
+      /*
+       * Jangan reset failureConfirmed.
+       * Monitor berikutnya akan sambung
+       * menunggu reset tanpa mencari
+       * popup sekali lagi.
+       */
+
+      updatePanel(
+        `${getStart()}-${getEnd()}: menunggu form reset...`
+      );
+
+      return;
+    }
+
+
+    /*
+     * Reset confirmed.
+     */
+
+    carianTelahDibuat =
+      false;
+
+    failureConfirmed =
+      false;
+
+
+    await wait(500);
+
+    await advanceRange();
+  }
+
+
+  /* ================================================================
+     EVENTS
+     ================================================================ */
+
+  function installEvents() {
+
+    el('ms-kategori')
+      .addEventListener(
+        'change',
+        async event => {
+
+          if (autoMode) {
+            return;
+          }
+
+          try {
+
+            await configureKategori(
+              event.target.value
+            );
+
+          } catch (err) {
+
+            console.error(err);
+
+            updatePanel(
+              `ERROR: ${err.message}`
+            );
+          }
+
+        }
+      );
+
+
+    el('ms-negeri')
+      .addEventListener(
+        'change',
+        async event => {
+
+          if (autoMode) {
+            return;
+          }
+
+          try {
+
+            await configureNegeri(
+              event.target.value
+            );
+
+          } catch (err) {
+
+            console.error(err);
+
+            updatePanel(
+              `ERROR: ${err.message}`
+            );
+          }
+
+        }
+      );
+
+
+    el('ms-awalan')
+      .addEventListener(
+        'change',
+        async event => {
+
+          if (autoMode) {
+            return;
+          }
+
+          try {
+
+            await configureAwalan(
+              event.target.value
+            );
+
+          } catch (err) {
+
+            console.error(err);
+
+            updatePanel(
+              `ERROR: ${err.message}`
+            );
+          }
+
+        }
+      );
+
+
+    el('ms-akhiran')
+      .addEventListener(
+        'change',
+        async event => {
+
+          if (autoMode) {
+            return;
+          }
+
+          try {
+
+            await configureAkhiran(
+              event.target.value
+            );
+
+          } catch (err) {
+
+            console.error(err);
+
+            updatePanel(
+              `ERROR: ${err.message}`
+            );
+          }
+
+        }
+      );
+
+
+    el('ms-start')
+      .addEventListener(
+        'change',
+        event => {
+
+          if (autoMode) {
+            return;
+          }
+
+
+          let value =
+            parseInt(
+              event.target.value,
+              10
+            );
+
+
+          if (
+            !Number.isFinite(value)
+          ) {
+            value = 1;
+          }
+
+
+          value =
+            Math.max(
+              1,
+              Math.min(
+                9999,
+                value
+              )
+            );
+
+
+          currentStart =
+            value;
+
+
+          event.target.value =
+            value;
+
+
+          updateRangeDisplay();
+
+          saveState();
+
+          updatePanel(
+            `Mula dari ${currentStart}`
+          );
+
+        }
+      );
+
+
+    el('ms-toggle')
+      .addEventListener(
+        'click',
+        async () => {
+
+          if (autoMode) {
+
+            autoMode = false;
+
+            carianTelahDibuat =
+              false;
+
+            failureConfirmed =
+              false;
+
+
+            lockConfig(false);
+
+
+            const toggle =
+              el('ms-toggle');
+
+            toggle.textContent =
+              'AKTIFKAN SEMI-AUTO';
+
+            toggle.classList.remove(
+              'running'
+            );
+
+
+            updatePanel(
+              'Semi-auto dihentikan'
+            );
+
+            return;
+          }
+
+
+          const validation =
+            validateConfig();
+
+
+          if (!validation.ok) {
+
+            updatePanel(
+              validation.msg
+            );
+
+            return;
+          }
+
+
+          autoMode = true;
+
+          carianTelahDibuat =
+            false;
+
+          failureConfirmed =
+            false;
+
+
+          lockConfig(true);
+
+
+          const toggle =
+            el('ms-toggle');
+
+          toggle.textContent =
+            'HENTIKAN SEMI-AUTO';
+
+          toggle.classList.add(
+            'running'
+          );
+
+
+          await isiForm();
+
+        }
+      );
+
+
+    /*
+     * Detect actual user click on Cari.
+     */
+
+    window.__mysikapClickHandler =
+      event => {
+
+        if (!autoMode) {
+          return;
+        }
+
+
+        const target =
+          event.target.closest(
+            'button,' +
+            'input[type="button"],' +
+            'input[type="submit"]'
+          );
+
+
+        if (!target) {
+          return;
+        }
+
+
+        const text =
+          clean(
+            target.textContent ||
+            target.value ||
+            ''
+          );
+
+
+        if (text === 'Cari') {
+
+          carianTelahDibuat =
+            true;
+
+          updatePanel(
+            `${getStart()}-${getEnd()}: mencari...`
+          );
+
+        }
+
+      };
+
+
+    document.addEventListener(
+      'click',
+      window.__mysikapClickHandler,
+      true
+    );
+
+
+    /*
+     * Detect physical Enter while
+     * Cari has focus.
+     */
+
+    window.__mysikapKeyHandler =
+      event => {
+
+        if (
+          !autoMode ||
+          event.key !== 'Enter'
+        ) {
+          return;
+        }
+
+
+        const cari =
+          getCariButton();
+
+
+        if (!cari) {
+          return;
+        }
+
+
+        if (
+          document.activeElement === cari
+        ) {
+
+          carianTelahDibuat =
+            true;
+
+
+          updatePanel(
+            `${getStart()}-${getEnd()}: mencari...`
+          );
+
+        }
+
+      };
+
+
+    document.addEventListener(
+      'keydown',
+      window.__mysikapKeyHandler,
+      true
+    );
+  }
+
+
+  /* ================================================================
+     RESTORE
+     ================================================================ */
+
+  async function restoreState() {
+
+    const saved =
+      loadState();
+
+
+    if (!saved) {
+
+      updatePanel(
+        'Pilih konfigurasi carian'
+      );
+
+      return;
+    }
+
+
+    if (
+      Number.isInteger(
+        Number(saved.start)
+      )
+    ) {
+
+      currentStart =
+        Math.max(
+          1,
+          Math.min(
+            9999,
+            Number(saved.start)
+          )
+        );
+
+
+      el('ms-start').value =
+        currentStart;
+    }
+
+
+    updateRangeDisplay();
+
+
+    const kategoriSelect =
+      el('ms-kategori');
+
+
+    const kategoriOptions =
+      [
+        ...kategoriSelect.options
+      ].map(option =>
+        option.value
+      );
+
+
+    if (
+      !saved.kategori ||
+      !kategoriOptions.includes(
+        saved.kategori
+      )
+    ) {
+
+      updatePanel(
+        'Pilih konfigurasi carian'
+      );
+
+      return;
+    }
+
+
+    kategoriSelect.value =
+      saved.kategori;
+
+
+    await configureKategori(
+      saved.kategori,
+      true,
+      saved
+    );
+  }
+
+
+  /* ================================================================
+     INIT
+     ================================================================ */
+
+  try {
+
+    buildPanel();
+
+    installEvents();
+
+    updateRangeDisplay();
+
+
+    updatePanel(
+      'Membaca MySIKAP...'
+    );
+
+
+    const categories =
+      await loadCategories();
+
+
+    if (!categories.length) {
+
+      throw new Error(
+        'Kategori Siri tidak dapat dibaca'
+      );
+    }
+
+
+    updatePanel(
+      `${categories.length} kategori tersedia`
+    );
+
+
+    await restoreState();
+
+
+    window.__mysikapRunnerInterval =
+      setInterval(
+        () => {
+
+          monitor().catch(err => {
+
+            console.error(
+              '[MySIKAP Monitor]',
+              err
+            );
+
+          });
+
+        },
+        500
+      );
+
+
+    console.log(
+      '[MySIKAP Range Runner v4.5] READY'
+    );
+
+  }
+
+  catch (err) {
+
+    console.error(
+      '[MySIKAP v4.5 INIT ERROR]',
+      err
+    );
+
+
+    updatePanel(
+      `INIT ERROR: ${err.message}`
+    );
+
+  }
+
+})();
